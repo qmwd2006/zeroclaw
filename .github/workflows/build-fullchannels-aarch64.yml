@@ -53,6 +53,12 @@ jobs:
       - name: Build web dashboard
         run: cargo web build
 
+      - name: Prepare bounded Linux ARM64 build memory
+        id: dist_memory
+        timeout-minutes: 5
+        shell: bash
+        run: bash scripts/ci/dist_runner_memory.sh prepare
+
       - name: Resolve dist features and append broad channel bundles
         id: feats
         shell: bash
@@ -85,6 +91,15 @@ jobs:
             printf '%-12s %10d bytes\n' "$b" "$(stat -c%s "$f")"
           done
           sha256sum "target/$TARGET/release/zeroclaw"
+
+      - name: Release bounded Linux ARM64 build memory
+        if: always()
+        timeout-minutes: 5
+        shell: bash
+        env:
+          ZC_DIST_SWAP_FILE: ${{ steps.dist_memory.outputs.swap_file }}
+          ZC_DIST_SWAP_IDENTITY: ${{ steps.dist_memory.outputs.swap_identity }}
+        run: bash scripts/ci/dist_runner_memory.sh cleanup
 
       - name: Package
         shell: bash
