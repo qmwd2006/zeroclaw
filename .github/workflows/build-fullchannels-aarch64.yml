@@ -1,0 +1,105 @@
+name: Build ZeroClaw full channels (aarch64, armbian)
+
+# Local fork workflow: build one aarch64 GNU binary that carries every
+# channel the upstream `dist` archive leaves out (notably channel-wechat,
+# which is not part of `channels-full` either), then publish it as an
+# artifact for a manual deploy to the armbian box.
+#
+# Feature set = upstream `dist` leaves + channels-full + channel-wechat.
+# `dist` already resolves matrix/lark/git/whatsapp-web/plugins-wasm-cranelift/
+# tools-compat, so only the two broad channel bundles are appended here.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build aarch64 full-channels
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CARGO_INCREMENTAL: 0
+      TARGET: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          targets: aarch64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: fullchannels-aarch64
+          cache-targets: false
+
+      - name: Install cross compiler
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build web dashboard
+        run: cargo web build
+
+      - name: Resolve dist features and append broad channel bundles
+        id: feats
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIST="$(cargo run --quiet -p xtask --bin generate -- features --selection dist --target "$TARGET")"
+          echo "dist features: $DIST"
+          FEATURES="$DIST,channels-full,channel-wechat"
+          echo "final features: $FEATURES"
+          echo "features=$FEATURES" >> "$GITHUB_OUTPUT"
+
+      - name: Build release
+        shell: bash
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          FEATURES: ${{ steps.feats.outputs.features }}
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --no-default-features \
+            --features "$FEATURES" --target "$TARGET" --jobs 2
+          cargo build --release --locked -p zerocode --target "$TARGET"
+          cargo build --release --locked -p zerorelay --target "$TARGET"
+
+      - name: Report sizes
+        shell: bash
+        run: |
+          set -euo pipefail
+          for b in zeroclaw zerocode zerorelay; do
+            f="target/$TARGET/release/$b"
+            printf '%-12s %10d bytes\n' "$b" "$(stat -c%s "$f")"
+          done
+          sha256sum "target/$TARGET/release/zeroclaw"
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cp "target/$TARGET/release/zeroclaw" out/
+          cp "target/$TARGET/release/zerocode" out/
+          cp "target/$TARGET/release/zerorelay" out/
+          cp -r web/dist out/web-dist
+          tar -czf "zeroclaw-fullchannels-$TARGET.tar.gz" -C out .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zeroclaw-fullchannels-${{ env.TARGET }}
+          path: zeroclaw-fullchannels-*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
